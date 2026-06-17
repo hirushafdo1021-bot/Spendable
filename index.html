@@ -776,9 +776,20 @@ function drawSummary(ctx,W,measure){
   if(state.payments.length){ for(const p of state.payments){ if(paint){
       const _paid=+p.paid||0, _alloc=+p.amount||0, _full=_alloc>0&&_paid>=_alloc, _part=_paid>0&&!_full;
       const _label=_full?'PAID':(_part?'PARTIAL':'PENDING'), _col=_full?P.mint:(_part?P.gold:P.coral);
-      ctx.fillStyle=_full?P.muted:P.text; ctx.font='500 14px '+SANS; ctx.fillText(trunc(p.name,innerW-210,'500 14px '+SANS),pad,y);
-      ctx.font='600 11px '+SANS; ctx.fillStyle=_col; ctx.textAlign='right'; ctx.fillText(_label,W-pad-105,y);
-      ctx.fillStyle=_full?P.muted:P.text; ctx.font='600 14px '+SANS; ctx.fillText(fmt(_paid)+' / '+fmt(_alloc),W-pad,y); ctx.textAlign='left'; } y+=rowH; }
+      const _amtStr=fmt(_paid)+' / '+fmt(_alloc);
+      // measure widths first so nothing overlaps regardless of amount length
+      ctx.font='600 14px '+SANS; const _amtW=ctx.measureText(_amtStr).width;
+      ctx.font='600 11px '+SANS; const _labW=ctx.measureText(_label).width;
+      const _labelRightX=W-pad-_amtW-18;          // right edge of the status label
+      const _nameMax=Math.max((_labelRightX-_labW-16)-pad,40);
+      // name (left)
+      ctx.textAlign='left'; ctx.fillStyle=_full?P.muted:P.text; ctx.font='500 14px '+SANS;
+      ctx.fillText(trunc(p.name,_nameMax,'500 14px '+SANS),pad,y);
+      // status label (right-aligned, just left of the amount)
+      ctx.textAlign='right'; ctx.fillStyle=_col; ctx.font='600 11px '+SANS; ctx.fillText(_label,_labelRightX,y);
+      // amount paid / allocated (right edge)
+      ctx.fillStyle=_full?P.muted:P.text; ctx.font='600 14px '+SANS; ctx.fillText(_amtStr,W-pad,y);
+      ctx.textAlign='left'; } y+=rowH; }
     if(paint){ ctx.fillStyle=P.muted; ctx.font='500 13px '+SANS; ctx.fillText('Paid '+fmt(c.paidFixed)+'  ·  Pending '+fmt(c.pendingFixed)+(c.overpaidFixed>0?'  ·  Overpaid '+fmt(c.overpaidFixed):''),pad,y+2); } y+=26;
   } else { if(paint){ ctx.fillStyle=P.muted; ctx.font='400 13px '+SANS; ctx.fillText('No fixed payments added.',pad,y); } y+=rowH; }
   y+=8;

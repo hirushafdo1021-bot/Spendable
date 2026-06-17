@@ -243,6 +243,8 @@ let activeTab='today', lastBudget=null;
 
 async function loadState(){
   try{ const v=localStorage.getItem(KEY); if(v){ const d=JSON.parse(v); state={...state,...d}; if(!state.incomes)state.incomes=[]; } }catch(e){}
+  // migrate: every fixed payment now tracks how much has actually been paid toward it
+  (state.payments||[]).forEach(p=>{ if(p.paid===undefined||p.paid===null){ p.paid = p.settled ? (+p.amount||0) : 0; } p.paid=+p.paid||0; });
 }
 async function saveState(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){ console.error(e); } }
 
@@ -275,19 +277,24 @@ function compute(){
   const extra=state.incomes.filter(i=>inCycle(i.date,c)).reduce((s,i)=>s+(+i.amount||0),0);
   const totalIncome=state.salary+extra;
   const totalFixed=state.payments.reduce((s,p)=>s+(+p.amount||0),0);
-  const settledFixed=state.payments.filter(p=>p.settled).reduce((s,p)=>s+(+p.amount||0),0);
+  const paidFixed=state.payments.reduce((s,p)=>s+(+p.paid||0),0);
+  const overpaidFixed=state.payments.reduce((s,p)=>s+Math.max(0,(+p.paid||0)-(+p.amount||0)),0);
+  const pendingFixed=state.payments.reduce((s,p)=>s+Math.max(0,(+p.amount||0)-(+p.paid||0)),0);
+  // money set aside for fixed bills = the bigger of what's allocated or what's actually been paid (overpay eats into livable income)
+  const reservedFixed=totalFixed+overpaidFixed;
+  const settledFixed=paidFixed; // back-compat alias
   const cspend=state.spending.filter(s=>inCycle(s.date,c));
   const spentCycle=cspend.reduce((s,e)=>s+(+e.amount||0),0);
   const tk=todayKey();
   const spentToday=cspend.filter(e=>e.date===tk).reduce((s,e)=>s+(+e.amount||0),0);
   const spentBefore=cspend.filter(e=>parseK(e.date)<mid(now)).reduce((s,e)=>s+(+e.amount||0),0);
-  const available=totalIncome-totalFixed;
-  const cashInHand=totalIncome-settledFixed-spentCycle;
+  const available=totalIncome-reservedFixed;
+  const cashInHand=totalIncome-paidFixed-spentCycle;
   const dailyLimit=(available-spentBefore)/daysLeft;
   const todaySpendable=dailyLimit-spentToday;
   const idealDaily=available/cycleLen;
   const remainingCycle=available-spentCycle;
-  return {c,cycleLen,daysLeft,extra,totalIncome,totalFixed,settledFixed,cspend,spentCycle,
+  return {c,cycleLen,daysLeft,extra,totalIncome,totalFixed,paidFixed,overpaidFixed,pendingFixed,reservedFixed,settledFixed,cspend,spentCycle,
     spentToday,available,cashInHand,dailyLimit,todaySpendable,idealDaily,remainingCycle};
 }
 
@@ -398,14 +405,21 @@ function todayView(){
       <div class="ttl"><span class="chip coral"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span><h3>Fixed payments</h3></div>
       <span class="head-amt coral">${fmt(c.totalFixed)}</span>
     </div>
-    ${state.payments.length? state.payments.map(p=>`
-      <div class="rowi ${p.settled?'settled':''}">
-        <div class="meta editable" data-editp="${p.id}"><div class="nm">${esc(p.name)} <svg class="pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></div><div class="amt">${fmt(+p.amount)} / month · tap to edit</div></div>
-        <button class="settle ${p.settled?'done':''}" data-settle="${p.id}">${p.settled?'Settled ✓':'Settle'}</button>
+    ${state.payments.length? state.payments.map(p=>{
+        const paid=+p.paid||0, alloc=+p.amount||0, rem=alloc-paid, full=alloc>0&&paid>=alloc;
+        let prog;
+        if(paid<=0) prog='not paid yet';
+        else if(rem>0) prog='paid '+fmt(paid)+' · '+fmt(rem)+' left';
+        else if(rem===0) prog='paid in full ✓';
+        else prog='paid '+fmt(paid)+' · overpaid '+fmt(-rem);
+        return `
+      <div class="rowi ${full?'settled':''}">
+        <div class="meta editable" data-editp="${p.id}"><div class="nm">${esc(p.name)} <svg class="pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></div><div class="amt">${fmt(alloc)} / month · ${prog}</div></div>
+        <button class="settle ${full?'done':''}" data-payfx="${p.id}">${full?'Pay more':'Pay'}</button>
         <button class="rm" data-rmp="${p.id}" aria-label="Remove">×</button>
-      </div>`).join('')
+      </div>`; }).join('')
       : `<div class="empty">Nothing fixed yet — add rent, loans or subscriptions.</div>`}
-    ${state.payments.length?`<div class="amt" style="text-align:center;padding-top:11px;border-top:1px solid var(--line);margin-top:4px;color:var(--muted)">Settled ${fmt(c.settledFixed)} of ${fmt(c.totalFixed)}</div>`:''}
+    ${state.payments.length?`<div class="amt" style="text-align:center;padding-top:11px;border-top:1px solid var(--line);margin-top:4px;color:var(--muted)">Paid ${fmt(c.paidFixed)} of ${fmt(c.totalFixed)}${c.overpaidFixed>0?' · overpaid '+fmt(c.overpaidFixed):''}</div>`:''}
     <button class="add-line" id="addPay">+ Add fixed payment</button>
   </div>
 
@@ -469,7 +483,7 @@ function statsView(){
     <div class="sbox"><div class="k">Cash in hand</div><div class="v" style="color:var(--gold)">${fmt(c.cashInHand)}</div></div>
     <div class="sbox"><div class="k">Avg / day so far</div><div class="v">${fmt(len-c.daysLeft+1>0?c.spentCycle/(len-c.daysLeft+1):0)}</div></div>
     <div class="sbox"><div class="k">Extra income</div><div class="v" style="color:var(--mint)">${fmt(c.extra)}</div></div>
-    <div class="sbox"><div class="k">Fixed pending</div><div class="v" style="color:var(--coral)">${fmt(c.totalFixed-c.settledFixed)}</div></div>
+    <div class="sbox"><div class="k">Fixed pending</div><div class="v" style="color:var(--coral)">${fmt(c.pendingFixed)}</div></div>
   </div>
 
   <div class="card">
@@ -502,7 +516,7 @@ function wireToday(){
   if(g('salaryRow')) g('salaryRow').onclick=openSalary;
   if(g('addInc')) g('addInc').onclick=openIncome;
   if(g('addPay')) g('addPay').onclick=openAddPay;
-  document.querySelectorAll('[data-settle]').forEach(b=>b.onclick=async()=>{const p=state.payments.find(x=>x.id===b.dataset.settle);if(p){p.settled=!p.settled;await saveState();render();}});
+  document.querySelectorAll('[data-payfx]').forEach(b=>b.onclick=()=>openSpend('fixed',b.dataset.payfx));
   document.querySelectorAll('[data-rmp]').forEach(b=>b.onclick=async()=>{state.payments=state.payments.filter(x=>x.id!==b.dataset.rmp);lastBudget=null;await saveState();render();});
   document.querySelectorAll('[data-rmi]').forEach(b=>b.onclick=async()=>{state.incomes=state.incomes.filter(x=>x.id!==b.dataset.rmi);lastBudget=null;await saveState();render();});
   document.querySelectorAll('[data-editp]').forEach(b=>b.onclick=()=>openEditPay(b.dataset.editp));
@@ -574,19 +588,24 @@ function openAddPay(){
 
 function openEditPay(id){
   const p=state.payments.find(x=>x.id===id); if(!p) return;
+  const paid=+p.paid||0, alloc=+p.amount||0;
   openSheet(`
     <h2>Edit payment</h2><p class="hint">Change the name or amount anytime — totals update instantly.</p>
     <div class="field"><label>Name</label><input class="input" type="text" id="epName" value="${esc(p.name)}"></div>
     <div class="field"><label>Amount per month</label><div class="with-cur"><span class="pfx">${state.currency}</span>
       <input class="input" id="epAmt" inputmode="decimal" value="${p.amount}"></div></div>
+    <div class="payinfo">Paid so far: <b>${fmt(paid)}</b>${paid>alloc?' · overpaid '+fmt(paid-alloc):(alloc-paid>0?' · '+fmt(alloc-paid)+' left':' · paid in full')}<br>Reset this at the start of a new cycle to track payments from zero again.</div>
     <button class="sheet-btn" id="epSave">Save changes</button>
+    ${paid>0?`<button class="sheet-btn ghost" id="epReset">Reset paid to ${state.currency} 0</button>`:''}
     <button class="sheet-btn danger" id="epDel">Delete payment</button>
     <button class="sheet-btn ghost" id="epCancel">Cancel</button>`);
   sheet.querySelector('#epCancel').onclick=closeSheet;
   sheet.querySelector('#epSave').onclick=async()=>{
     const name=sheet.querySelector('#epName').value.trim(), amt=parseFloat(sheet.querySelector('#epAmt').value)||0;
     if(!name||amt<=0){flash(sheet.querySelector('#epSave'),'Enter a name and amount');return;}
-    p.name=name; p.amount=amt; lastBudget=null; await saveState(); closeSheet(); render(); };
+    p.name=name; p.amount=amt; p.settled=amt>0 && (+p.paid||0)>=amt; lastBudget=null; await saveState(); closeSheet(); render(); };
+  if(sheet.querySelector('#epReset')) sheet.querySelector('#epReset').onclick=async()=>{
+    p.paid=0; p.settled=false; lastBudget=null; await saveState(); closeSheet(); render(); };
   sheet.querySelector('#epDel').onclick=async()=>{
     state.payments=state.payments.filter(x=>x.id!==id); lastBudget=null; await saveState(); closeSheet(); render(); };
 }
@@ -610,20 +629,85 @@ function openEditIncome(id){
     state.incomes=state.incomes.filter(x=>x.id!==id); lastBudget=null; await saveState(); closeSheet(); render(); };
 }
 
-function openSpend(){
+function openSpend(mode, preId){
+  mode = mode || 'normal';
+  if(mode==='fixed' && !state.payments.length) mode='normal';
   openSheet(`
-    <h2>Log a payment</h2><p class="hint">Track what you spent today. Your daily limit updates instantly.</p>
-    <div class="field"><label>Amount</label><div class="with-cur"><span class="pfx">${state.currency}</span>
-      <input class="input" id="spAmt" inputmode="decimal" placeholder="0"></div></div>
-    <div class="field"><label>What for? <span style="color:var(--muted-2)">(optional)</span></label>
-      <input class="input" type="text" id="spNote" placeholder="Lunch, fuel, groceries…"></div>
-    <button class="sheet-btn" id="saveSp">Add to today</button>
-    <button class="sheet-btn ghost" id="cancelSp">Cancel</button>`);
-  sheet.querySelector('#cancelSp').onclick=closeSheet;
-  sheet.querySelector('#saveSp').onclick=async()=>{
-    const amt=parseFloat(sheet.querySelector('#spAmt').value)||0; if(amt<=0){flash(sheet.querySelector('#saveSp'),'Enter an amount');return;}
-    state.spending.push({id:uid(),date:todayKey(),amount:amt,note:sheet.querySelector('#spNote').value.trim(),ts:Date.now()});
-    await saveState(); closeSheet(); render(); };
+    <h2>Log a payment</h2><p class="hint">First choose the kind of payment you're making.</p>
+    <div class="seg" id="payMode">
+      <button data-m="normal" class="${mode==='normal'?'sel':''}">Normal payment</button>
+      <button data-m="fixed" class="${mode==='fixed'?'sel':''}">Fixed payment</button>
+    </div>
+    <div id="payBody"></div>`);
+
+  let curMode=mode, selId=preId||null;
+  const body=sheet.querySelector('#payBody');
+
+  function normalBody(){
+    body.innerHTML=`
+      <div class="field"><label>Amount</label><div class="with-cur"><span class="pfx">${state.currency}</span>
+        <input class="input" id="spAmt" inputmode="decimal" placeholder="0"></div></div>
+      <div class="field"><label>What for? <span style="color:var(--muted-2)">(optional)</span></label>
+        <input class="input" type="text" id="spNote" placeholder="Lunch, fuel, groceries…"></div>
+      <button class="sheet-btn" id="saveSp">Add to today</button>
+      <button class="sheet-btn ghost" id="cancelSp">Cancel</button>`;
+    body.querySelector('#cancelSp').onclick=closeSheet;
+    body.querySelector('#saveSp').onclick=async()=>{
+      const amt=parseFloat(body.querySelector('#spAmt').value)||0;
+      if(amt<=0){flash(body.querySelector('#saveSp'),'Enter an amount');return;}
+      state.spending.push({id:uid(),date:todayKey(),amount:amt,note:body.querySelector('#spNote').value.trim(),ts:Date.now()});
+      lastBudget=null; await saveState(); closeSheet(); render(); };
+    setTimeout(()=>{const f=body.querySelector('#spAmt'); if(f) f.focus();},60);
+  }
+
+  function fixedBody(){
+    if(!state.payments.length){
+      body.innerHTML=`<div class="payinfo">You haven't added any fixed payments yet. Add one from the <b>Fixed payments</b> card first, then come back to pay it.</div>
+        <button class="sheet-btn ghost" id="cancelSp">Close</button>`;
+      body.querySelector('#cancelSp').onclick=closeSheet; return;
+    }
+    body.innerHTML=`
+      <div class="field"><label>Which fixed payment are you paying?</label>
+        <div class="cur-pick" id="fxPick">${state.payments.map(p=>`<button data-p="${p.id}" class="${selId===p.id?'sel':''}">${esc(p.name)}</button>`).join('')}</div></div>
+      <div id="fxInfo"></div>`;
+    const pick=body.querySelector('#fxPick');
+    pick.querySelectorAll('button').forEach(b=>b.onclick=()=>{ selId=b.dataset.p;
+      pick.querySelectorAll('button').forEach(x=>x.classList.remove('sel')); b.classList.add('sel'); paintFxInfo(); });
+    paintFxInfo();
+  }
+
+  function paintFxInfo(){
+    const info=body.querySelector('#fxInfo'); if(!info) return;
+    const p=state.payments.find(x=>x.id===selId);
+    if(!p){ info.innerHTML=`<div class="payinfo">Pick a fixed payment above to pay toward it.</div>`; return; }
+    const paid=+p.paid||0, alloc=+p.amount||0, rem=alloc-paid;
+    let line;
+    if(rem>0) line=`Allocated <b>${fmt(alloc)}</b> · paid <b>${fmt(paid)}</b> · <b>${fmt(rem)}</b> still to pay`;
+    else if(rem===0) line=`Allocated <b>${fmt(alloc)}</b> · <b>paid in full</b>`;
+    else line=`Allocated <b>${fmt(alloc)}</b> · paid <b>${fmt(paid)}</b> · <b>overpaid by ${fmt(-rem)}</b>`;
+    info.innerHTML=`
+      <div class="payinfo"><b>${esc(p.name)}</b><br>${line}</div>
+      <div class="field"><label>Amount you're paying now</label><div class="with-cur"><span class="pfx">${state.currency}</span>
+        <input class="input" id="fxAmt" inputmode="decimal" placeholder="0" value="${rem>0?rem:''}"></div></div>
+      <button class="sheet-btn" id="fxSave">Pay this</button>
+      <button class="sheet-btn ghost" id="fxCancel">Cancel</button>`;
+    info.querySelector('#fxCancel').onclick=closeSheet;
+    info.querySelector('#fxSave').onclick=async()=>{
+      const amt=parseFloat(info.querySelector('#fxAmt').value)||0;
+      if(amt<=0){flash(info.querySelector('#fxSave'),'Enter an amount');return;}
+      p.paid=(+p.paid||0)+amt;
+      p.settled = alloc>0 && p.paid>=alloc;
+      lastBudget=null; await saveState(); closeSheet(); render(); };
+    setTimeout(()=>{const f=info.querySelector('#fxAmt'); if(f) f.focus();},60);
+  }
+
+  sheet.querySelectorAll('#payMode button').forEach(b=>b.onclick=()=>{
+    curMode=b.dataset.m;
+    sheet.querySelectorAll('#payMode button').forEach(x=>x.classList.toggle('sel',x.dataset.m===curMode));
+    if(curMode==='normal') normalBody(); else fixedBody();
+  });
+
+  if(curMode==='normal') normalBody(); else fixedBody();
 }
 
 function openSettings(){
@@ -655,7 +739,7 @@ function drawSummary(ctx,W,measure){
 
   y=pad+26;
   if(paint){ ctx.fillStyle=P.text; ctx.font='italic 600 30px '+SERIF; ctx.fillText('spendable',pad,y);
-    ctx.fillStyle=P.muted; ctx.font='500 14px '+SANS; ctx.textAlign='right'; ctx.fillText('Payments summary',W-pad,y-6); ctx.textAlign='left'; }
+    ctx.fillStyle=P.muted; ctx.font='500 14px '+SANS; ctx.textAlign='right'; ctx.fillText('Account statement',W-pad,y-6); ctx.textAlign='left'; }
   y+=18; hr(); y+=24;
   if(paint){ ctx.fillStyle=P.muted; ctx.font='400 13px '+SANS;
     ctx.fillText('Generated '+now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'long',year:'numeric'})+' · '+now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}),pad,y);
@@ -690,10 +774,12 @@ function drawSummary(ctx,W,measure){
 
   section('Fixed payments','Total '+fmt(c.totalFixed));
   if(state.payments.length){ for(const p of state.payments){ if(paint){
-      ctx.fillStyle=p.settled?P.muted:P.text; ctx.font='500 14px '+SANS; ctx.fillText(trunc(p.name,innerW-210,'500 14px '+SANS),pad,y);
-      ctx.font='600 11px '+SANS; ctx.fillStyle=p.settled?P.mint:P.coral; ctx.textAlign='right'; ctx.fillText(p.settled?'SETTLED':'PENDING',W-pad-105,y);
-      ctx.fillStyle=p.settled?P.muted:P.text; ctx.font='600 14px '+SANS; ctx.fillText(fmt(+p.amount),W-pad,y); ctx.textAlign='left'; } y+=rowH; }
-    if(paint){ ctx.fillStyle=P.muted; ctx.font='500 13px '+SANS; ctx.fillText('Settled '+fmt(c.settledFixed)+'  ·  Pending '+fmt(c.totalFixed-c.settledFixed),pad,y+2); } y+=26;
+      const _paid=+p.paid||0, _alloc=+p.amount||0, _full=_alloc>0&&_paid>=_alloc, _part=_paid>0&&!_full;
+      const _label=_full?'PAID':(_part?'PARTIAL':'PENDING'), _col=_full?P.mint:(_part?P.gold:P.coral);
+      ctx.fillStyle=_full?P.muted:P.text; ctx.font='500 14px '+SANS; ctx.fillText(trunc(p.name,innerW-210,'500 14px '+SANS),pad,y);
+      ctx.font='600 11px '+SANS; ctx.fillStyle=_col; ctx.textAlign='right'; ctx.fillText(_label,W-pad-105,y);
+      ctx.fillStyle=_full?P.muted:P.text; ctx.font='600 14px '+SANS; ctx.fillText(fmt(_paid)+' / '+fmt(_alloc),W-pad,y); ctx.textAlign='left'; } y+=rowH; }
+    if(paint){ ctx.fillStyle=P.muted; ctx.font='500 13px '+SANS; ctx.fillText('Paid '+fmt(c.paidFixed)+'  ·  Pending '+fmt(c.pendingFixed)+(c.overpaidFixed>0?'  ·  Overpaid '+fmt(c.overpaidFixed):''),pad,y+2); } y+=26;
   } else { if(paint){ ctx.fillStyle=P.muted; ctx.font='400 13px '+SANS; ctx.fillText('No fixed payments added.',pad,y); } y+=rowH; }
   y+=8;
 
@@ -702,13 +788,64 @@ function drawSummary(ctx,W,measure){
     ['Average per day',fmt((c.cycleLen-c.daysLeft+1)>0?c.spentCycle/(c.cycleLen-c.daysLeft+1):0)],['Ideal daily pace',fmt(c.idealDaily)]];
   for(const r of sp){ if(paint){ ctx.fillStyle=P.muted; ctx.font='400 14px '+SANS; ctx.fillText(r[0],pad,y);
       ctx.textAlign='right'; ctx.fillStyle=P.text; ctx.font='600 14px '+SANS; ctx.fillText(r[1],W-pad,y); ctx.textAlign='left'; } y+=rowH; }
+  y+=14;
+
+  /* ---- dated transaction statement: every income + daily payment in date order ---- */
+  section('Transaction statement','This cycle');
+  // build ledger entries from incomes and daily spending that fall inside this cycle
+  const ledger=[];
+  state.incomes.filter(i=>inCycle(i.date,c.c)).forEach(i=>ledger.push({ts:(i.ts||parseK(i.date).getTime()),date:i.date,desc:i.name||'Income',type:'in',amount:+i.amount||0}));
+  c.cspend.forEach(e=>ledger.push({ts:(e.ts||parseK(e.date).getTime()),date:e.date,desc:e.note||'Payment',type:'out',amount:+e.amount||0}));
+  ledger.sort((a,b)=>a.ts-b.ts);
+
+  // column geometry
+  const cDate=pad, cAmt=W-pad, cBal=W-pad, wAmt=120, wBal=120;
+  const cDesc=pad+96, descMax=innerW-96-wAmt-wBal-24;
+  // header row
+  if(paint){ ctx.fillStyle=P.muted; ctx.font='600 10px '+SANS;
+    ctx.fillText('DATE',cDate,y);
+    ctx.fillText('DESCRIPTION',cDesc,y);
+    ctx.textAlign='right'; ctx.fillText('AMOUNT',cAmt-wBal-24,y); ctx.fillText('BALANCE',cBal,y); ctx.textAlign='left'; }
   y+=10; hr(); y+=22;
+
+  if(ledger.length){
+    let bal=state.salary; // opening balance = salary credited at payday
+    if(paint){ // opening line
+      ctx.fillStyle=P.muted; ctx.font='500 13px '+SANS; ctx.fillText(payStr(c.c.prev),cDate,y);
+      ctx.fillStyle=P.text; ctx.font='italic 500 13px '+SERIF; ctx.fillText('Opening · monthly salary',cDesc,y);
+      ctx.textAlign='right'; ctx.fillStyle=P.gold; ctx.font='600 13px '+SANS; ctx.fillText('+ '+fmt(state.salary),cAmt-wBal-24,y);
+      ctx.fillStyle=P.text; ctx.fillText(fmt(bal),cBal,y); ctx.textAlign='left'; }
+    y+=rowH;
+    let lastDate=null;
+    for(const t of ledger){
+      bal += t.type==='in'? t.amount : -t.amount;
+      if(paint){
+        const showDate = t.date!==lastDate;
+        ctx.fillStyle=P.muted; ctx.font='500 13px '+SANS;
+        if(showDate) ctx.fillText(payStr(parseK(t.date)),cDate,y);
+        ctx.fillStyle=P.text; ctx.font='500 14px '+SANS; ctx.fillText(trunc(t.desc,descMax,'500 14px '+SANS),cDesc,y);
+        ctx.textAlign='right';
+        ctx.fillStyle=t.type==='in'?P.mint:P.coral; ctx.font='600 14px '+SANS;
+        ctx.fillText((t.type==='in'?'+ ':'− ')+fmt(t.amount),cAmt-wBal-24,y);
+        ctx.fillStyle=bal<0?P.coral:P.text; ctx.font='600 14px '+SANS; ctx.fillText(fmt(bal),cBal,y);
+        ctx.textAlign='left';
+      }
+      lastDate=t.date; y+=rowH;
+    }
+    if(paint){ y+=2; hr(); y+=20;
+      ctx.fillStyle=P.muted; ctx.font='600 13px '+SANS; ctx.fillText('Closing balance (excl. fixed bills)',cDesc,y);
+      ctx.textAlign='right'; ctx.fillStyle=bal<0?P.coral:P.gold; ctx.font='700 14px '+SANS; ctx.fillText(fmt(bal),cBal,y); ctx.textAlign='left'; }
+    y+=rowH;
+  } else {
+    if(paint){ ctx.fillStyle=P.muted; ctx.font='400 13px '+SANS; ctx.fillText('No incomes or daily payments logged this cycle yet.',pad,y); } y+=rowH;
+  }
+  y+=12; hr(); y+=22;
   if(paint){ ctx.fillStyle=P.muted; ctx.font='400 12px '+SANS; ctx.fillText('spendable · all amounts in '+state.currency+' · salary on the 25th (Friday if weekend)',pad,y); }
   y+=pad;
   return y;
 }
 function makeSummaryCanvas(){
-  const W=720, DPR=2, m=document.createElement('canvas').getContext('2d');
+  const W=800, DPR=2, m=document.createElement('canvas').getContext('2d');
   const H=Math.ceil(drawSummary(m,W,true));
   const cv=document.createElement('canvas'); cv.width=W*DPR; cv.height=H*DPR;
   const ctx=cv.getContext('2d'); ctx.scale(DPR,DPR);

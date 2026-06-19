@@ -194,6 +194,27 @@
   .cur-pick{display:flex;gap:8px;flex-wrap:wrap}
   .cur-pick button{padding:9px 14px;border-radius:11px;border:1px solid var(--line-strong);background:var(--bg-0);color:var(--text);font-family:var(--num);font-size:14px;cursor:pointer}
   .cur-pick button.sel{border-color:var(--mint);background:rgba(103,232,195,.12);color:var(--mint)}
+  .gfilter{margin:2px 0 12px}
+  .gfilter button{padding:7px 12px;font-size:12.5px}
+  .grp-list{display:flex;flex-direction:column;gap:8px}
+  .grp{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg-0)}
+  .grp.open{border-color:var(--line-strong)}
+  .grp-head{width:100%;display:flex;align-items:center;gap:10px;padding:13px 14px;background:none;border:none;color:var(--text);cursor:pointer;text-align:left}
+  .gh-name{flex:1;font-size:14.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gh-qty{font-family:var(--num);font-size:12px;color:var(--muted);background:rgba(255,255,255,.06);border-radius:8px;padding:3px 8px}
+  .gh-amt{font-family:var(--num);font-weight:600;font-size:14.5px;font-variant-numeric:tabular-nums}
+  .gh-caret{width:18px;height:18px;color:var(--muted);transition:transform .2s ease;flex-shrink:0}
+  .grp.open .gh-caret{transform:rotate(180deg)}
+  .grp-body{padding:2px 14px 10px;border-top:1px solid var(--line)}
+  .grp-day{display:flex;align-items:center;padding:9px 0;border-top:1px solid var(--line);font-size:13.5px}
+  .grp-day:first-child{border-top:none}
+  .gd-date{flex:1;color:var(--text)}
+  .gd-qty{width:64px;text-align:center;font-family:var(--num);color:var(--muted)}
+  .gd-amt{width:96px;text-align:right;font-family:var(--num);font-weight:600;font-variant-numeric:tabular-nums}
+  .grp-colhead{font-size:10.5px;letter-spacing:.4px;color:var(--muted);text-transform:uppercase}
+  .grp-colhead .gd-date,.grp-colhead .gd-qty,.grp-colhead .gd-amt{color:var(--muted);font-weight:500}
+  .grp-foot{font-weight:600;color:var(--mint)}
+  .grp-foot .gd-qty{color:var(--mint)}
   .sheet-btn{width:100%;padding:16px;border-radius:15px;border:none;font-weight:700;font-size:15px;font-family:var(--body);cursor:pointer;margin-top:6px;transition:transform .12s;
     background:linear-gradient(180deg,var(--mint-soft),var(--mint));color:#08231b}
   .sheet-btn:active{transform:scale(.98)}
@@ -238,13 +259,16 @@
 <script>
 /* ---------- state ---------- */
 const KEY='budget-data';
-let state={ salary:0, currency:'Rs', payments:[], incomes:[], spending:[], installDismissed:false };
-let activeTab='today', lastBudget=null;
+let state={ salary:0, currency:'Rs', payments:[], incomes:[], spending:[], salaryByCycle:{}, cycleAck:null, installDismissed:false };
+let activeTab='today', lastBudget=null, paydayDismissed=false, grpFilter='all', grpOpen={};
 
 async function loadState(){
   try{ const v=localStorage.getItem(KEY); if(v){ const d=JSON.parse(v); state={...state,...d}; if(!state.incomes)state.incomes=[]; } }catch(e){}
   // migrate: every fixed payment now tracks how much has actually been paid toward it
   (state.payments||[]).forEach(p=>{ if(p.paid===undefined||p.paid===null){ p.paid = p.settled ? (+p.amount||0) : 0; } p.paid=+p.paid||0; });
+  // migrate: per-cycle salary tracking. Existing users are acknowledged for the current cycle so they aren't prompted retroactively.
+  if(!state.salaryByCycle) state.salaryByCycle={};
+  if(state.salary>0 && !state.cycleAck){ const k=cycleKey(); state.cycleAck=k; if(state.salaryByCycle[k]===undefined) state.salaryByCycle[k]=state.salary; }
 }
 async function saveState(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){ console.error(e); } }
 
@@ -268,6 +292,36 @@ function getCycle(now){
   return {prev:paydayFor(now.getFullYear(),now.getMonth()-1), next:tp};
 }
 const inCycle=(ds,c)=>{ const d=parseK(ds); return d>=c.prev && d<c.next; };
+// stable key for the current pay cycle (its start / payday date)
+const cycleKey=(now)=>dKey(getCycle(now||new Date()).prev);
+
+// normalised key used to group payments that share a name (case/space-insensitive)
+const groupKey=n=>(n||'Payment').trim().toLowerCase().replace(/\s+/g,' ');
+
+// distinct past payment names, most-used first — used to suggest names while logging
+function suggestNames(limit){
+  const count={}, label={};
+  state.spending.forEach(e=>{ const n=(e.note||'').trim(); if(!n) return; const k=groupKey(n);
+    count[k]=(count[k]||0)+1; if(!label[k]) label[k]=n; });
+  return Object.keys(count).sort((a,b)=>count[b]-count[a]).map(k=>label[k]).slice(0,limit||8);
+}
+
+// group this cycle's daily payments by name → totals, counts, and per-day breakdown
+function groupSpend(entries){
+  const g={};
+  entries.forEach(e=>{ const k=groupKey(e.note||'Payment');
+    if(!g[k]) g[k]={key:k,name:(e.note||'').trim()||'Payment',total:0,count:0,items:[]};
+    g[k].total+=(+e.amount||0); g[k].count++; g[k].items.push(e); });
+  const groups=Object.values(g);
+  groups.forEach(gr=>{
+    gr.items.sort((a,b)=>(b.ts||0)-(a.ts||0));
+    const byDay={};
+    gr.items.forEach(e=>{ if(!byDay[e.date]) byDay[e.date]={date:e.date,count:0,total:0,ts:e.ts||0};
+      byDay[e.date].count++; byDay[e.date].total+=(+e.amount||0); byDay[e.date].ts=Math.max(byDay[e.date].ts,e.ts||0); });
+    gr.days=Object.values(byDay).sort((a,b)=>parseK(b.date)-parseK(a.date));
+  });
+  return groups.sort((a,b)=>b.total-a.total);
+}
 
 /* ---------- compute ---------- */
 function compute(){
@@ -434,6 +488,52 @@ function todayView(){
   </div>`;
 }
 
+function groupsCard(c){
+  const groups=groupSpend(c.cspend);
+  const chip=`<span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg></span>`;
+  if(!groups.length){
+    return `<div class="card"><div class="card-head"><div class="ttl">${chip}<h3>Spending by payment</h3></div></div>
+      <div class="empty" style="padding:6px 2px 14px">No daily payments yet this cycle. Log a few — repeats with the same name are grouped here so you can see totals like all your lunches together.</div></div>`;
+  }
+  const names=['all',...groups.map(g=>g.key)];
+  const active=(grpFilter==='all'||groups.some(g=>g.key===grpFilter))?grpFilter:'all';
+  const shown=active==='all'?groups:groups.filter(g=>g.key===active);
+  const filterChips=`<div class="cur-pick gfilter">${names.map(k=>{
+      const lbl=k==='all'?'All':(groups.find(g=>g.key===k)||{}).name;
+      return `<button data-gf="${esc(k)}" class="${active===k?'sel':''}">${esc(lbl)}</button>`; }).join('')}</div>`;
+
+  const rows=shown.map(g=>{
+    const open=grpOpen[g.key];
+    const dayRows=g.days.map(d=>`
+      <div class="grp-day">
+        <span class="gd-date">${parseK(d.date).toLocaleDateString(undefined,{day:'numeric',month:'short'})}</span>
+        <span class="gd-qty">×${d.count}</span>
+        <span class="gd-amt">${fmt(d.total)}</span>
+      </div>`).join('');
+    return `<div class="grp ${open?'open':''}">
+      <button class="grp-head" data-grp="${esc(g.key)}">
+        <span class="gh-name">${esc(g.name)}</span>
+        <span class="gh-qty">×${g.count}</span>
+        <span class="gh-amt">${fmt(g.total)}</span>
+        <svg class="gh-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      ${open?`<div class="grp-body">
+        <div class="grp-day grp-colhead"><span class="gd-date">Date</span><span class="gd-qty">Times</span><span class="gd-amt">Amount</span></div>
+        ${dayRows}
+        <div class="grp-day grp-foot"><span class="gd-date">${g.days.length} day${g.days.length!==1?'s':''}</span><span class="gd-qty">×${g.count}</span><span class="gd-amt">${fmt(g.total)}</span></div>
+      </div>`:''}
+    </div>`;
+  }).join('');
+
+  return `<div class="card">
+    <div class="card-head"><div class="ttl">${chip}<h3>Spending by payment</h3></div>
+      <span class="head-amt">${shown.reduce((s,g)=>s+g.total,0)?fmt(shown.reduce((s,g)=>s+g.total,0)):''}</span></div>
+    <div class="empty" style="padding:0 2px 10px;font-size:11.5px">Tap a group to see each date and how many times you paid.</div>
+    ${filterChips}
+    <div class="grp-list">${rows}</div>
+  </div>`;
+}
+
 function statsView(){
   if(!state.salary) return `<div class="card"><div class="empty" style="padding:42px 10px">Set up your salary on the Today tab,<br>then your spending appears here.</div></div>`;
   const c=compute(), len=c.cycleLen;
@@ -486,6 +586,8 @@ function statsView(){
     <div class="sbox"><div class="k">Fixed pending</div><div class="v" style="color:var(--coral)">${fmt(c.pendingFixed)}</div></div>
   </div>
 
+  ${groupsCard(c)}
+
   <div class="card">
     <div class="card-head"><div class="ttl"><span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></span><h3>Payments summary</h3></div></div>
     <div class="empty" style="padding:2px 2px 14px">A full snapshot of your salary, income, fixed payments and spending — save it to keep or share.</div>
@@ -528,6 +630,8 @@ function wireStats(){
   const g=id=>document.getElementById(id);
   if(g('expPng')) g('expPng').onclick=()=>exportSummary('png');
   if(g('expPdf')) g('expPdf').onclick=()=>exportSummary('pdf');
+  document.querySelectorAll('[data-grp]').forEach(b=>b.onclick=()=>{ const k=b.dataset.grp; grpOpen[k]=!grpOpen[k]; render(); });
+  document.querySelectorAll('[data-gf]').forEach(b=>b.onclick=()=>{ grpFilter=b.dataset.gf; render(); });
 }
 
 /* ---------- sheets ---------- */
@@ -553,7 +657,41 @@ function openSalary(){
   let pick=state.currency;
   sheet.querySelectorAll('#curPick button').forEach(b=>b.onclick=()=>{pick=b.dataset.c;sheet.querySelectorAll('#curPick button').forEach(x=>x.classList.remove('sel'));b.classList.add('sel');sheet.querySelector('.pfx').textContent=pick;});
   sheet.querySelector('#cancelSal').onclick=closeSheet;
-  sheet.querySelector('#saveSal').onclick=async()=>{ state.salary=parseFloat(sheet.querySelector('#salIn').value)||0; state.currency=pick; lastBudget=null; await saveState(); closeSheet(); render(); };
+  sheet.querySelector('#saveSal').onclick=async()=>{ state.salary=parseFloat(sheet.querySelector('#salIn').value)||0; state.currency=pick; const k=cycleKey(); state.cycleAck=k; state.salaryByCycle[k]=state.salary; lastBudget=null; await saveState(); closeSheet(); render(); };
+}
+
+// detect a newly-started pay cycle and prompt for the new salary (old data is kept)
+function checkPayday(){
+  if(state.salary<=0) return;            // not set up yet — normal onboarding handles it
+  if(paydayDismissed) return;            // user closed it this session
+  const k=cycleKey();
+  if(state.cycleAck && state.cycleAck!==k) openPayday(k);
+}
+
+function openPayday(newKey){
+  const c=compute(), prevSalary=state.salary;
+  openSheet(`
+    <h2>New pay cycle 🎉</h2><p class="hint">It's a new month — payday has rolled over. Add this cycle's salary. Everything from your last cycle is kept.</p>
+    <div class="payinfo">Cycle ${payStr(c.c.prev)} – ${payStr(c.c.next)}<br>Last cycle's salary was <b>${fmt(prevSalary)}</b>.</div>
+    <div class="field"><label>This cycle's take-home salary</label>
+      <div class="with-cur"><span class="pfx">${state.currency}</span>
+      <input class="input" id="pdSal" inputmode="decimal" placeholder="0" value="${prevSalary||''}"></div></div>
+    <label class="pdrow" id="pdResetWrap" style="display:flex;align-items:center;gap:10px;margin:4px 2px 10px;cursor:pointer;color:var(--muted)">
+      <input type="checkbox" id="pdReset" style="width:18px;height:18px;accent-color:var(--mint)">
+      <span>Start fixed payments fresh (set every bill's paid amount back to 0)</span></label>
+    <button class="sheet-btn" id="pdSave">Confirm salary for this cycle</button>
+    <button class="sheet-btn ghost" id="pdLater">Not now</button>`);
+  sheet.querySelector('#pdLater').onclick=()=>{ paydayDismissed=true; closeSheet(); };
+  sheet.querySelector('#pdSave').onclick=async()=>{
+    const val=parseFloat(sheet.querySelector('#pdSal').value)||0;
+    if(val<=0){ flash(sheet.querySelector('#pdSave'),'Enter this cycle\u2019s salary'); return; }
+    // archive the salary that applied to the cycle just ended, then set the new one
+    if(state.cycleAck) state.salaryByCycle[state.cycleAck]=prevSalary;
+    state.salary=val; state.cycleAck=newKey; state.salaryByCycle[newKey]=val;
+    if(sheet.querySelector('#pdReset').checked){ state.payments.forEach(p=>{ p.paid=0; p.settled=false; }); }
+    paydayDismissed=true; lastBudget=null; await saveState(); closeSheet(); render();
+  };
+  setTimeout(()=>{ const f=sheet.querySelector('#pdSal'); if(f){ f.focus(); f.select&&f.select(); } },60);
 }
 
 function openIncome(){
@@ -644,18 +782,26 @@ function openSpend(mode, preId){
   const body=sheet.querySelector('#payBody');
 
   function normalBody(){
+    const sugg=suggestNames(8);
     body.innerHTML=`
       <div class="field"><label>Amount</label><div class="with-cur"><span class="pfx">${state.currency}</span>
         <input class="input" id="spAmt" inputmode="decimal" placeholder="0"></div></div>
       <div class="field"><label>What for? <span style="color:var(--muted-2)">(optional)</span></label>
-        <input class="input" type="text" id="spNote" placeholder="Lunch, fuel, groceries…"></div>
+        <input class="input" type="text" id="spNote" placeholder="Lunch, fuel, groceries…" autocomplete="off"></div>
+      ${sugg.length?`<div class="field" style="margin-top:-4px"><label style="font-size:11px">Tap to reuse — keeps payments grouped</label>
+        <div class="cur-pick" id="spSugg">${sugg.map(n=>`<button type="button" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>`:''}
       <button class="sheet-btn" id="saveSp">Add to today</button>
       <button class="sheet-btn ghost" id="cancelSp">Cancel</button>`;
+    const noteEl=body.querySelector('#spNote');
+    body.querySelectorAll('#spSugg button').forEach(b=>b.onclick=()=>{
+      noteEl.value=b.dataset.n;
+      body.querySelectorAll('#spSugg button').forEach(x=>x.classList.remove('sel')); b.classList.add('sel');
+      const a=body.querySelector('#spAmt'); if(a&&!a.value) a.focus(); });
     body.querySelector('#cancelSp').onclick=closeSheet;
     body.querySelector('#saveSp').onclick=async()=>{
       const amt=parseFloat(body.querySelector('#spAmt').value)||0;
       if(amt<=0){flash(body.querySelector('#saveSp'),'Enter an amount');return;}
-      state.spending.push({id:uid(),date:todayKey(),amount:amt,note:body.querySelector('#spNote').value.trim(),ts:Date.now()});
+      state.spending.push({id:uid(),date:todayKey(),amount:amt,note:noteEl.value.trim(),ts:Date.now()});
       lastBudget=null; await saveState(); closeSheet(); render(); };
     setTimeout(()=>{const f=body.querySelector('#spAmt'); if(f) f.focus();},60);
   }
@@ -953,7 +1099,7 @@ document.getElementById('tabToday').onclick=()=>{if(activeTab!=='today'){activeT
 document.getElementById('tabStats').onclick=()=>{if(activeTab!=='stats'){activeTab='stats';render();}};
 document.getElementById('gearBtn').onclick=openSettings;
 let lastDay=todayKey();
-setInterval(()=>{ if(todayKey()!==lastDay){lastDay=todayKey();lastBudget=null;render();} else refreshDate(); },30000);
+setInterval(()=>{ if(todayKey()!==lastDay){lastDay=todayKey();lastBudget=null;render();checkPayday();} else refreshDate(); },30000);
 
-(async()=>{ await loadState(); render(); })();
+(async()=>{ await loadState(); render(); checkPayday(); })();
 </script>

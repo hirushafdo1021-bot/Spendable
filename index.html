@@ -520,7 +520,6 @@ function groupsCard(c){
       ${open?`<div class="grp-body">
         <div class="grp-day grp-colhead"><span class="gd-date">Date</span><span class="gd-qty">Times</span><span class="gd-amt">Amount</span></div>
         ${dayRows}
-        <div class="grp-day grp-foot"><span class="gd-date">${g.days.length} day${g.days.length!==1?'s':''}</span><span class="gd-qty">×${g.count}</span><span class="gd-amt">${fmt(g.total)}</span></div>
       </div>`:''}
     </div>`;
   }).join('');

@@ -961,13 +961,64 @@ function openSettings(){
     <h2>Settings</h2>
     <div class="field"><label>Install</label><button class="sheet-btn" id="goInstall" style="margin-top:0">Add to Home Screen</button></div>
     <div class="field"><label>Salary &amp; currency</label><button class="sheet-btn ghost" id="goSal" style="margin-top:0">Edit salary settings</button></div>
+    <div class="field"><label>Backup your data</label>
+      <div class="payinfo" id="persState" style="margin-bottom:10px">Checking storage protection…</div>
+      <button class="sheet-btn" id="doExport" style="margin-top:0">Download backup file</button>
+      <div style="height:10px"></div>
+      <button class="sheet-btn ghost" id="doImport" style="margin-top:0">Restore from backup</button>
+      <input type="file" id="impFile" accept="application/json,.json" style="display:none">
+    </div>
     <div class="field"><label>Start over</label><button class="sheet-btn danger" id="resetAll">Clear all data</button></div>
     <button class="sheet-btn ghost" id="closeSet">Done</button>`);
   sheet.querySelector('#closeSet').onclick=closeSheet;
   sheet.querySelector('#goInstall').onclick=()=>{closeSheet();setTimeout(openInstall,260);};
   sheet.querySelector('#goSal').onclick=()=>{closeSheet();setTimeout(openSalary,260);};
+
+  // show whether the browser is protecting this app's storage from auto-eviction
+  const ps=sheet.querySelector('#persState');
+  (async()=>{
+    try{
+      let persisted = navigator.storage&&navigator.storage.persisted ? await navigator.storage.persisted() : false;
+      if(!persisted && navigator.storage&&navigator.storage.persist){ persisted = await navigator.storage.persist(); }
+      ps.innerHTML = persisted
+        ? 'Your data is protected — the browser won\u2019t auto-clear it. Still, keep a backup file to be safe.'
+        : 'Tip: the browser can clear app data when storage runs low. Download a backup now so you never lose your records.';
+      ps.style.borderColor = persisted?'rgba(103,232,195,.3)':'rgba(243,201,139,.3)';
+      ps.style.background = persisted?'rgba(103,232,195,.08)':'rgba(243,201,139,.08)';
+    }catch(e){ ps.textContent='Download a backup file so your data is never lost.'; }
+  })();
+
+  sheet.querySelector('#doExport').onclick=()=>{
+    try{
+      const data=JSON.stringify(state);
+      const blob=new Blob([data],{type:'application/json'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      const d=new Date().toISOString().slice(0,10);
+      a.href=url; a.download='spendable-backup-'+d+'.json'; document.body.appendChild(a); a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1000);
+    }catch(e){ alert('Could not create backup: '+e); }
+  };
+  const impFile=sheet.querySelector('#impFile');
+  sheet.querySelector('#doImport').onclick=()=>impFile.click();
+  impFile.onchange=()=>{
+    const f=impFile.files&&impFile.files[0]; if(!f) return;
+    const r=new FileReader();
+    r.onload=async()=>{
+      try{
+        const d=JSON.parse(r.result);
+        if(typeof d!=='object'||d===null||(d.salary===undefined&&!d.payments&&!d.spending)) throw new Error('Not a Spendable backup');
+        const btn=sheet.querySelector('#doImport');
+        if(btn.dataset.c!==r.result){ btn.dataset.c=r.result; btn.textContent='Tap again to confirm restore'; impFile.value=''; return; }
+        state={...state,...d}; lastBudget=null; await saveState(); closeSheet(); render();
+      }catch(e){ alert('That file isn\u2019t a valid Spendable backup.'); }
+      impFile.value='';
+    };
+    r.readAsText(f);
+  };
+
   sheet.querySelector('#resetAll').onclick=async()=>{const b=sheet.querySelector('#resetAll');
-    if(b.dataset.c){state={salary:0,currency:state.currency,payments:[],incomes:[],spending:[]};lastBudget=null;try{localStorage.removeItem(KEY);}catch(e){}await saveState();closeSheet();render();}
+    if(b.dataset.c){state={salary:0,currency:state.currency,payments:[],incomes:[],spending:[],savings:[],carryover:0,salaryByCycle:{},cycleAck:null};lastBudget=null;try{localStorage.removeItem(KEY);}catch(e){}await saveState();closeSheet();render();}
     else{b.dataset.c='1';b.textContent='Tap again to erase everything';}};
 }
 
@@ -1149,7 +1200,7 @@ function exportSummary(kind){
 const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true;
 let deferredPrompt=null;
 window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); deferredPrompt=e; });
-if('serviceWorker' in navigator){ window.addEventListener('load',function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); }); }
+if('serviceWorker' in navigator){ window.addEventListener('load',function(){ navigator.serviceWorker.register('sw.js',{scope:'./'}).catch(function(){}); }); }
 
 function detectBrowser(){
   const ua=navigator.userAgent;
@@ -1195,5 +1246,7 @@ document.getElementById('gearBtn').onclick=openSettings;
 let lastDay=todayKey();
 setInterval(()=>{ if(todayKey()!==lastDay){lastDay=todayKey();lastBudget=null;render();checkPayday();} else refreshDate(); },30000);
 
-(async()=>{ await loadState(); render(); checkPayday(); })();
+(async()=>{ await loadState(); render(); checkPayday();
+  try{ if(navigator.storage&&navigator.storage.persist){ const p=await navigator.storage.persisted(); if(!p) await navigator.storage.persist(); } }catch(e){}
+})();
 </script>
